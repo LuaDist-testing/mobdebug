@@ -1,0 +1,111 @@
+MobDebug is a remote debugger for Lua.
+
+MobDebug allows you control the execution of another Lua program remotely,
+set breakpoints, and inspect the current state of the program.
+
+MobDebug is based on RemDebug (http://www.keplerproject.org/remdebug/) and
+extends it in several ways:
+
+1. fixed several existing bugs;
+2. added new commands: LOAD, RELOAD, OUT, STACK;
+3. added support for MoSync clients (http://mosync.com/) using
+   MobileLua (https://github.com/divineprog/mobilelua);
+4. added support for debugging wxwidgets applications;
+5. tested integration with ZeroBrane Studio IDE and Estrela editor
+   (https://github.com/pkulchenko/ZeroBraneStudio);
+6. removed dependency on LuaFileSystem;
+7. added ability to pause and abort running applications;
+8. added pretty printing and handling of multiple results in EXEC;
+9. added stack and local/upvalue value reporting (STACK);
+a. added on/off commands to turn debugging on and off (to improve performance);
+b. added support for coroutine debugging (see examples/README for details).
+
+INSTALLATION
+
+Make src/mobdebug.lua available to your script.
+See examples/README and examples/*.lua for examples of how to use the module.
+
+DEPENDENCIES
+
+MobDebug depends on LuaSocket 2.0 and has been tested with Lua 5.1.
+
+AUTHOR
+
+Paul Kulchenko (paul@kulchenko.com)
+
+LICENSE
+
+See LICENSE file
+
+HISTORY 
+
+Aug 05 2012 v0.48
+  - Added support for coroutine debugging. Added methods (coro/moai) to
+    support coroutine debugging without adding 'on()' calls to all coroutines.
+  - Added on/off methods to turn debugging on and off (to improve performance).
+  - Fixed an issue with localized variables not being properly restored
+    if there are multiple variables with the same name in the environment.
+  - Added restoring variables between stack calls to make them reflect changes
+    that can be caused by EXEC/EVAL commands.
+  - Fixed compilation errors on scripts with a shebang line.
+
+Jun 28 2012 v0.47
+  - Added special handling to debug clients running under LuaJIT.
+  - Fixed an issue when a remote client could not suspend/exit.
+  - Added default configuration for start/loop/listen methods.
+  - Relaxed safety checks to allow debugging lua code called from C
+    functions (to support debugging Love2d and similar applications).
+  - Fixed incorrect initial stack level when started with start() command.
+  - Added short_src field to the reported stack data.
+
+Jun 19 2012 v0.46
+  - Added reporting of stack and variable (local/upvalue) information.
+  - Added support for multiple results returned by EXEC/EVAL commands.
+  - Added serialization/pretty-printing of results from EXEC/EVAL.
+
+May 28 2012 v0.45
+  - Added select() implementation to mosync client to abort/break a running
+    mosync app.
+  - Added support for scratchpad.
+  - Added SUSPEND command to suspend execution of a running script.
+  - Added 'loadstring' command to load chunks of code to run under debugger.
+  - Added safety mechanism to LOAD/RELOAD to avoid aborting when there are
+    C functions in the stack.
+  - Added reset for loaded modules to get 'require' to be processed correctly
+    after LOAD/RELOAD commands.
+  - Added integration with MobileLua event loop to allow debugging of
+    applications that require event loop processing.
+  - Improved handling and reporting of run-time errors during debugging.
+  - Fixed handling of multi-line fragments with comments executed with EXEC/EVAL.
+  - Fixed exit from the debugger when the application throws an error.
+  - Fixed an issue with saving/restoring internal local variables.
+  - Fixed an issue with local variables not being updated after EXEC/EVAL
+    commands.
+
+Mar 20 2012 v0.44
+  - Updated to work with "mosync" namespace (MobileLua 20120319 and MoSync 3.0).
+  - Removed the use of "module()".
+
+Jan 16 2012 v0.43
+  - Fixed errors from LOAD/RELOAD commands when used with start() method.
+  - Added reporting of a file name and a line number to properly display
+    source code when attach to a debugger.
+
+Dec 30 2011 v0.42
+  - Added support for debugging of wxwidgets applications.
+  - Added ability to break an application being debugged; this requires
+    socket.select and async processing (doesn't work from the command line).
+
+Dec 17 2011 v0.41
+  - Added slash conversion in filenames to make breakpoints work regardless
+    of how slashes are specified in file names and in setb/delb commands.
+  - Added tests with breakpoints in files in subfolders.
+  - Added optimization for filename processing in the debug hook
+    (Christoph Kubisch).
+  - Added conversion of newlines for EVAL/EXEC commands to make them work
+    with multiline expressions.
+  - Allowed 'setb' and 'delb' commands to accept '-' as the filename.
+    The last referenced (checked/stopped at/etc.) filename is used.
+
+Dec 02 2011 v0.40
+  - First public release.
