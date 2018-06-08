@@ -1,18 +1,10 @@
--- This file was automatically generated for the LuaDist project.
+package = "MobDebug"
+version = "0.60-1"
 
-package = "mobdebug"
-version = "0.55-1"
-
--- LuaDist source
 source = {
-  tag = "0.55-1",
-  url = "git://github.com/LuaDist-testing/mobdebug.git"
+   url = "git://github.com/pkulchenko/MobDebug.git",
+   tag = "0.60"
 }
--- Original source
--- source = {
---    url = "git://github.com/pkulchenko/MobDebug.git",
---    tag = "0.55"
--- }
 
 description = {
    summary = "MobDebug is a remote debugger for the Lua programming language",
