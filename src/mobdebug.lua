@@ -1,15 +1,16 @@
 --
--- MobDebug 0.50
+-- MobDebug 0.51
 -- Copyright 2011-12 Paul Kulchenko
 -- Based on RemDebug 1.0 Copyright Kepler Project 2005
 --
 
 local mobdebug = {
   _NAME = "mobdebug",
-  _VERSION = 0.50,
+  _VERSION = 0.51,
   _COPYRIGHT = "Paul Kulchenko",
   _DESCRIPTION = "Mobile Remote Debugger for the Lua programming language",
-  port = 8171
+  port = os and os.getenv and os.getenv("MOBDEBUG_PORT") or 8172,
+  yieldtimeout = 0.02,
 }
 
 local coroutine = coroutine
@@ -23,8 +24,18 @@ local require = require
 local setmetatable = setmetatable
 local string = string
 local tonumber = tonumber
-local mosync = mosync
-local jit = jit
+
+-- if strict.lua is used, then need to avoid referencing some global
+-- variables, as they can be undefined;
+-- use rawget to to avoid complaints from strict.lua at run-time.
+-- it's safe to do the initialization here as all these variables
+-- should get defined values (of any) before the debugging starts.
+-- there is also global 'wx' variable, which is checked as part of
+-- the debug loop as 'wx' can be loaded at any time during debugging.
+local genv = _G or _ENV
+local jit = rawget(genv, "jit")
+local mosync = rawget(genv, "mosync")
+local MOAICoroutine = rawget(genv, "MOAICoroutine")
 
 -- check for OS and convert file names to lower case on windows
 -- (its file system is case insensitive, but case preserving), as setting a
@@ -169,6 +180,12 @@ if mosync and mosync.EventMonitor then
   mosync.EventMonitor.RunEventLoop = function(self) end
 end
 
+-- turn jit off based on Mike Pall's comment in this discussion:
+-- http://www.freelists.org/post/luajit/Debug-hooks-and-JIT,2
+-- "You need to turn it off at the start if you plan to receive
+-- reliable hook calls at any later point in time."
+if jit and jit.off then jit.off() end
+
 local socket = mosync and socketMobileLua() or (require "socket")
 
 local debug = require "debug"
@@ -189,6 +206,8 @@ local step_level = 0
 local stack_level = 0
 local server
 local rset
+local outputs = {}
+local iobase = {print = print}
 local basedir = ""
 local deferror = "execution aborted at default debugee"
 local debugee = function () 
@@ -199,7 +218,7 @@ end
 local function q(s) return s:gsub('([%(%)%.%%%+%-%*%?%[%^%$%]])','%%%1') end
 
 local serpent = (function() ---- include Serpent module for serialization
-local n, v = "serpent", 0.18 -- (C) 2012 Paul Kulchenko; MIT License
+local n, v = "serpent", 0.20 -- (C) 2012 Paul Kulchenko; MIT License
 local c, d = "Paul Kulchenko", "Serializer and pretty printer of Lua data types"
 local snum = {[tostring(1/0)]='1/0 --[[math.huge]]',[tostring(-1/0)]='-1/0 --[[-math.huge]]',[tostring(0/0)]='0/0'}
 local badtype = {thread = true, userdata = true}
@@ -250,7 +269,7 @@ local function s(t, opts)
       seen[t] = spath
       return tag..globerr(t, level)
     elseif ttype == 'function' then
-      seen[t] = spath
+      seen[t] = insref or spath
       local ok, res = pcall(string.dump, t)
       local func = ok and ((opts.nocode and "function() --[[..skipped..]] end" or
         "loadstring("..safestr(res)..",'@serialized')")..comment(t, level))
@@ -258,6 +277,8 @@ local function s(t, opts)
     elseif ttype == "table" then
       if level >= maxl then return tag..'{}'..comment('max', level) end
       seen[t] = insref or spath -- set path to use as reference
+      if getmetatable(t) and getmetatable(t).__tostring
+        then return tag..safestr(tostring(t))..comment("meta", level) end
       if next(t) == nil then return tag..'{}'..comment(t, level) end -- table empty
       local maxn, o, out = #t, {}, {}
       for key = 1, maxn do table.insert(o, key) end
@@ -388,9 +409,9 @@ local function restore_vars(vars)
   end
 end
 
-local function capture_vars()
+local function capture_vars(level)
   local vars = {}
-  local func = debug.getinfo(3, "f").func
+  local func = debug.getinfo(level or 3, "f").func
   local i = 1
   while true do
     local name, value = debug.getupvalue(func, i)
@@ -400,7 +421,7 @@ local function capture_vars()
   end
   i = 1
   while true do
-    local name, value = debug.getlocal(3, i)
+    local name, value = debug.getlocal(level or 3, i)
     if not name then break end
     if string.sub(name, 1, 1) ~= '(' then vars[name] = value end
     i = i + 1
@@ -582,7 +603,8 @@ local function debugger_loop(sfile, sline)
 
   while true do
     local line, err
-    if wx and server.settimeout then server:settimeout(0.1) end
+    local wx = rawget(genv, "wx") -- use rawread to make strict.lua happy
+    if (wx or mobdebug.yield) and server.settimeout then server:settimeout(mobdebug.yieldtimeout) end
     while true do
       line, err = server:receive()
       if not line and err == "timeout" then
@@ -605,7 +627,10 @@ local function debugger_loop(sfile, sline)
             win:Connect(wx.wxEVT_TIMER, exitLoop)
             app:MainLoop()
           end
+        elseif mobdebug.yield then mobdebug.yield()
         end
+      elseif not line and err == "closed" then
+        error("Debugger connection unexpectedly closed")
       else
         break
       end
@@ -638,10 +663,10 @@ local function debugger_loop(sfile, sline)
           status, res = stringify_results(pcall(func))
         end
         if status then
-          server:send("200 OK " .. string.len(res) .. "\n") 
+          server:send("200 OK " .. #res .. "\n")
           server:send(res)
         else
-          server:send("401 Error in Expression " .. string.len(res) .. "\n")
+          server:send("401 Error in Expression " .. #res .. "\n")
           server:send(res)
         end
       else
@@ -677,7 +702,7 @@ local function debugger_loop(sfile, sline)
               debugee = func
               coroutine.yield("load")
             else
-              server:send("401 Error in Expression " .. string.len(res) .. "\n")
+              server:send("401 Error in Expression " .. #res .. "\n")
               server:send(res)
             end
           else
@@ -695,7 +720,7 @@ local function debugger_loop(sfile, sline)
           watches[newidx] = func
           server:send("200 OK " .. newidx .. "\n") 
         else
-          server:send("401 Error in Expression " .. string.len(res) .. "\n")
+          server:send("401 Error in Expression " .. #res .. "\n")
           server:send(res)
         end
       else
@@ -723,7 +748,7 @@ local function debugger_loop(sfile, sline)
       elseif ev == events.RESTART then
         -- nothing to do
       else
-        server:send("401 Error in Execution " .. string.len(file) .. "\n")
+        server:send("401 Error in Execution " .. #file .. "\n")
         server:send(file)
       end
     elseif command == "STEP" then
@@ -739,7 +764,7 @@ local function debugger_loop(sfile, sline)
       elseif ev == events.RESTART then
         -- nothing to do
       else
-        server:send("401 Error in Execution " .. string.len(file) .. "\n")
+        server:send("401 Error in Execution " .. #file .. "\n")
         server:send(file)
       end
     elseif command == "OVER" or command == "OUT" then
@@ -760,7 +785,7 @@ local function debugger_loop(sfile, sline)
       elseif ev == events.RESTART then
         -- nothing to do
       else
-        server:send("401 Error in Execution " .. string.len(file) .. "\n")
+        server:send("401 Error in Execution " .. #file .. "\n")
         server:send(file)
       end
     elseif command == "BASEDIR" then
@@ -789,6 +814,27 @@ local function debugger_loop(sfile, sline)
         else
           server:send("401 Error in Expression 0\n")
         end
+      end
+    elseif command == "OUTPUT" then
+      local _, _, stream, mode = string.find(line, "^[A-Z]+%s+(%w+)%s+([dcr])%s*$")
+      if stream and mode and stream == "stdout" then
+        -- assign "print" in the global environment
+        genv.print = mode == 'd' and iobase.print or coroutine.wrap(function(...)
+          -- wrapping into coroutine.wrap protects this function from
+          -- being stepped through in the debugger
+          local tbl = {...}
+          while true do
+            if mode == 'c' then iobase.print(unpack(tbl)) end
+            for n = 1, #tbl do
+              tbl[n] = serpent.line(tbl[n], {nocode = true, comment = false}) end
+            local file = table.concat(tbl, "\t").."\n"
+            server:send("204 Output " .. stream .. " " .. #file .. "\n" .. file)
+            tbl = {coroutine.yield()}
+          end
+        end)
+        server:send("200 OK\n")
+      else
+        server:send("400 Bad Request\n")
       end
     elseif command == "EXIT" then
       server:send("200 OK\n")
@@ -834,6 +880,11 @@ local function start(controller_host, controller_port)
     -- start from 16th frame, which is sufficiently large for this check.
     stack_level = stack_depth(16)
 
+    -- provide our own traceback function to report the error remotely
+    do
+      local dtraceback = debug.traceback
+      debug.traceback = function (err) genv.print(dtraceback(err, 3)) end
+    end
     coro_debugger = coroutine.create(debugger_loop)
     debug.sethook(debug_hook, "lcr")
     return coroutine.resume(coro_debugger, file, info.currentline)
@@ -857,7 +908,7 @@ local function controller(controller_host, controller_port)
 
     local function report(trace, err)
       local msg = err .. "\n" .. trace
-      server:send("401 Error in Execution " .. string.len(msg) .. "\n")
+      server:send("401 Error in Execution " .. #msg .. "\n")
       server:send(msg)
       return err
     end
@@ -887,8 +938,8 @@ local function controller(controller_host, controller_port)
           report(debug.traceback(coro_debugee), tostring(err))
           if exitonerror then break end
           -- resume once more to clear the response the debugger wants to send
-          local status, err = coroutine.resume(coro_debugger, events.RESTART)
-          if status and err == "exit" then break end
+          local status, err = coroutine.resume(coro_debugger, events.RESTART, capture_vars(2))
+          if not status or status and err == "exit" then break end
         end
       end
     end
@@ -939,45 +990,58 @@ local function off()
 end
 
 -- Handles server debugging commands 
-local function handle(params, client)
+local function handle(params, client, options)
   local _, _, command = string.find(params, "^([a-z]+)")
   local file, line, watch_idx
   if command == "run" or command == "step" or command == "out"
   or command == "over" or command == "exit" then
     client:send(string.upper(command) .. "\n")
     client:receive() -- this should consume the first '200 OK' response
-    local breakpoint = client:receive()
-    if not breakpoint then
-      print("Program finished")
-      os.exit()
-      return -- use return here for those cases where os.exit() is not wanted
-    end
-    local _, _, status = string.find(breakpoint, "^(%d+)")
-    if status == "200" then
-      -- don't need to do anything
-    elseif status == "202" then
-      _, _, file, line = string.find(breakpoint, "^202 Paused%s+(.-)%s+(%d+)%s*$")
-      if file and line then 
-        print("Paused at file " .. file .. " line " .. line)
+    while true do
+      local done = true
+      local breakpoint = client:receive()
+      if not breakpoint then
+        print("Program finished")
+        os.exit()
+        return -- use return here for those cases where os.exit() is not wanted
       end
-    elseif status == "203" then
-      _, _, file, line, watch_idx = string.find(breakpoint, "^203 Paused%s+(.-)%s+(%d+)%s+(%d+)%s*$")
-      if file and line and watch_idx then
-        print("Paused at file " .. file .. " line " .. line .. " (watch expression " .. watch_idx .. ": [" .. watches[watch_idx] .. "])")
-      end
-    elseif status == "401" then 
-      local _, _, size = string.find(breakpoint, "^401 Error in Execution (%d+)$")
-      if size then
-        local msg = client:receive(tonumber(size))
-        print("Error in remote application: " .. msg)
+      local _, _, status = string.find(breakpoint, "^(%d+)")
+      if status == "200" then
+        -- don't need to do anything
+      elseif status == "202" then
+        _, _, file, line = string.find(breakpoint, "^202 Paused%s+(.-)%s+(%d+)%s*$")
+        if file and line then
+          print("Paused at file " .. file .. " line " .. line)
+        end
+      elseif status == "203" then
+        _, _, file, line, watch_idx = string.find(breakpoint, "^203 Paused%s+(.-)%s+(%d+)%s+(%d+)%s*$")
+        if file and line and watch_idx then
+          print("Paused at file " .. file .. " line " .. line .. " (watch expression " .. watch_idx .. ": [" .. watches[watch_idx] .. "])")
+        end
+      elseif status == "204" then
+        local _, _, stream, size = string.find(breakpoint, "^204 Output (%w+) (%d+)$")
+        if stream and size then
+          local msg = client:receive(tonumber(size))
+          print(msg)
+          if outputs[stream] then outputs[stream](msg) end
+          -- this was just the output, so go back reading the response
+          done = false
+        end
+      elseif status == "401" then
+        local _, _, size = string.find(breakpoint, "^401 Error in Execution (%d+)$")
+        if size then
+          local msg = client:receive(tonumber(size))
+          print("Error in remote application: " .. msg)
+          os.exit(1)
+          return nil, nil, msg -- use return here for those cases where os.exit() is not wanted
+        end
+      else
+        print("Unknown error")
         os.exit(1)
-        return nil, nil, msg -- use return here for those cases where os.exit() is not wanted
+        -- use return here for those cases where os.exit() is not wanted
+        return nil, nil, "Debugger error: unexpected response '" .. breakpoint .. "'"
       end
-    else
-      print("Unknown error")
-      os.exit(1)
-      -- use return here for those cases where os.exit() is not wanted
-      return nil, nil, "Debugger error: unexpected response '" .. breakpoint .. "'"
+      if done then break end
     end
   elseif command == "setb" then
     _, _, _, file, line = string.find(params, "^([a-z]+)%s+(.-)%s+(%d+)%s*$")
@@ -1082,7 +1146,7 @@ local function handle(params, client)
         if not file then
            _, _, file, lines = string.find(exp, "^(%S+)%s+(.+)")
         end
-        client:send("LOAD " .. string.len(lines) .. " " .. file .. "\n")
+        client:send("LOAD " .. #lines .. " " .. file .. "\n")
         client:send(lines)
       else
         local file = io.open(exp, "r")
@@ -1099,48 +1163,61 @@ local function handle(params, client)
 
         local file = string.gsub(exp, "\\", "/") -- convert slash
         file = string.gsub(file, '^'..q(basedir), '') -- remove basedir
-        client:send("LOAD " .. string.len(lines) .. " " .. file .. "\n")
+        client:send("LOAD " .. #lines .. " " .. file .. "\n")
         client:send(lines)
       end
-      local params = client:receive()
-      if not params then
-        return nil, nil, "Debugger error: missing response after EXEC/LOAD"
-      end
-      local _, _, status, len = string.find(params, "^(%d+).-%s+(%d+)%s*$")
-      if status == "200" then
-        len = tonumber(len)
-        if len > 0 then 
-          local status, res
-          local str = client:receive(len)
-          -- handle serialized table with results
-          local func, err = loadstring(str)
-          if func then
-            status, res = pcall(func)
-            if not status then err = res
-            elseif type(res) ~= "table" then
-              err = "received "..type(res).." instead of expected 'table'"
-            end
-          end
-          if err then
-            print("Error in processing results: " .. err)
-            return nil, nil, "Error in processing results: " .. err
-          end
-          print((table.unpack or unpack)(res))
-          return res[1], res
+      while true do
+        local params = client:receive()
+        if not params then
+          return nil, nil, "Debugger error: missing response after EXEC/LOAD"
         end
-      elseif status == "201" then
-        _, _, file, line = string.find(params, "^201 Started%s+(.-)%s+(%d+)%s*$")
-      elseif status == "202" or params == "200 OK" then
-        -- do nothing; this only happens when RE/LOAD command gets the response
-        -- that was for the original command that was aborted
-      elseif status == "401" then
-        len = tonumber(len)
-        local res = client:receive(len)
-        print("Error in expression: " .. res)
-        return nil, nil, res
-      else
-        print("Unknown error")
-        return nil, nil, "Debugger error: unexpected response after EXEC/LOAD '" .. params .. "'"
+        local done = true
+        local _, _, status, len = string.find(params, "^(%d+).-%s+(%d+)%s*$")
+        if status == "200" then
+          len = tonumber(len)
+          if len > 0 then
+            local status, res
+            local str = client:receive(len)
+            -- handle serialized table with results
+            local func, err = loadstring(str)
+            if func then
+              status, res = pcall(func)
+              if not status then err = res
+              elseif type(res) ~= "table" then
+                err = "received "..type(res).." instead of expected 'table'"
+              end
+            end
+            if err then
+              print("Error in processing results: " .. err)
+              return nil, nil, "Error in processing results: " .. err
+            end
+            print((table.unpack or unpack)(res))
+            return res[1], res
+          end
+        elseif status == "201" then
+          _, _, file, line = string.find(params, "^201 Started%s+(.-)%s+(%d+)%s*$")
+        elseif status == "202" or params == "200 OK" then
+          -- do nothing; this only happens when RE/LOAD command gets the response
+          -- that was for the original command that was aborted
+        elseif status == "204" then
+          local _, _, stream, size = string.find(params, "^204 Output (%w+) (%d+)$")
+          if stream and size then
+            local msg = client:receive(tonumber(size))
+            print(msg)
+            if outputs[stream] then outputs[stream](msg) end
+            -- this was just the output, so go back reading the response
+            done = false
+          end
+        elseif status == "401" then
+          len = tonumber(len)
+          local res = client:receive(len)
+          print("Error in expression: " .. res)
+          return nil, nil, res
+        else
+          print("Unknown error")
+          return nil, nil, "Debugger error: unexpected response after EXEC/LOAD '" .. params .. "'"
+        end
+        if done then break end
       end
     else
       print("Invalid command")
@@ -1192,6 +1269,22 @@ local function handle(params, client)
       print("Unknown error")
       return nil, nil, "Debugger error: unexpected response after STACK"
     end
+  elseif command == "output" then
+    local _, _, stream, mode = string.find(params, "^[a-z]+%s+(%w+)%s+([dcr])%s*$")
+    if stream and mode then
+      client:send("OUTPUT "..stream.." "..mode.."\n")
+      local resp = client:receive()
+      local _, _, status = string.find(resp, "^(%d+)%s+%w+%s*$")
+      if status == "200" then
+        print("Stream "..stream.." redirected")
+        outputs[stream] = type(options) == 'table' and options.handler or nil
+      else
+        print("Unknown error")
+        return nil, nil, "Debugger error: can't redirect "..stream
+      end
+    else
+      print("Invalid command")
+    end
   elseif command == "basedir" then
     local _, _, dir = string.find(params, "^[a-z]+%s+(.+)$")
     if dir then
@@ -1230,6 +1323,7 @@ local function handle(params, client)
     print("load <file>           -- loads a local file for debugging")
     print("reload                -- restarts the current debugging session")
     print("stack                 -- reports stack trace")
+    print("output stdout <d|c|r> -- capture and redirect io stream (default|copy|redirect)")
     print("basedir [<path>]      -- sets the base path of the remote application, or shows the current one")
     print("exit                  -- exits debugger")
   else
@@ -1322,6 +1416,7 @@ mobdebug.moai = moai
 mobdebug.coro = coro
 mobdebug.line = serpent.line
 mobdebug.dump = serpent.dump
+mobdebug.yield = nil -- callback
 
 -- this is needed to make "require 'modebug'" to work when mobdebug
 -- module is loaded manually
