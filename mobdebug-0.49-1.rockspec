@@ -1,17 +1,17 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "mobdebug"
-version = "0.48-1"
+version = "0.49-1"
 
 -- LuaDist source
 source = {
-  tag = "0.48-1",
+  tag = "0.49-1",
   url = "git://github.com/LuaDist-testing/mobdebug.git"
 }
 -- Original source
 -- source = {
 --    url = "git://github.com/pkulchenko/MobDebug.git",
---    tag = "0.48"
+--    tag = "0.49"
 -- }
 
 description = {
